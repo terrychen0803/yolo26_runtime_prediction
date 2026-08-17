@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import getpass
 import json
+import pwd
 import shutil
 import subprocess
 import sys
@@ -85,10 +87,17 @@ def run_with_log(
         return process.wait()
 
 
-def get_nsys_version() -> str | None:
+def get_nsys_version(
+    nsys_path: str,
+) -> str | None:
+    """
+    Return the version string for the exact Nsight Systems
+    executable selected by this runner.
+    """
+
     try:
         result = subprocess.run(
-            ["nsys", "--version"],
+            [nsys_path, "--version"],
             capture_output=True,
             text=True,
             check=False,
@@ -106,6 +115,53 @@ def get_nsys_version() -> str | None:
 
     except Exception:
         return None
+
+
+def restore_file_ownership(
+    path: Path,
+    username: str,
+) -> None:
+    """
+    Nsight Systems runs as root when --sudo-nsys is used.
+    The generated .nsys-rep is therefore normally owned by root.
+
+    Restore ownership to the user who owns/runs the experiment
+    so that later export, feature extraction, deletion, etc.
+    can be done without sudo.
+    """
+
+    try:
+        user_info = pwd.getpwnam(username)
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Cannot resolve Linux user: {username}"
+        ) from exc
+
+    owner = (
+        f"{user_info.pw_uid}:"
+        f"{user_info.pw_gid}"
+    )
+
+    result = subprocess.run(
+        [
+            "sudo",
+            "chown",
+            owner,
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Nsight report was generated, but ownership "
+            "could not be restored.\n"
+            f"File: {path}\n"
+            f"User: {username}\n"
+            f"Error: {result.stderr.strip()}"
+        )
 
 
 def main() -> None:
@@ -212,6 +268,36 @@ def main() -> None:
         ),
     )
 
+    # ----------------------------------------------------------
+    # Privileged Nsight configuration
+    # ----------------------------------------------------------
+
+    parser.add_argument(
+        "--sudo-nsys",
+        action="store_true",
+        help=(
+            "Run Nsight Systems itself with sudo. "
+            "Useful when NVIDIA GPU performance counters "
+            "require elevated privilege. "
+            "The target application is still run as the user "
+            "specified by --run-as."
+        ),
+    )
+
+    parser.add_argument(
+        "--run-as",
+        default=getpass.getuser(),
+        help=(
+            "Linux user used to run the profiled target "
+            "when --sudo-nsys is enabled. "
+            "Default: current user."
+        ),
+    )
+
+    # ----------------------------------------------------------
+    # Experiment paths / control
+    # ----------------------------------------------------------
+
     parser.add_argument(
         "--experiments",
         type=Path,
@@ -236,8 +322,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # ----------------------------------------------------------
+    # Argument validation
+    # ----------------------------------------------------------
+
     if args.repeat < 1:
-        raise ValueError("--repeat must be >= 1")
+        raise ValueError(
+            "--repeat must be >= 1"
+        )
 
     if args.gpu_metrics_frequency < 10:
         raise ValueError(
@@ -249,8 +341,28 @@ def main() -> None:
             "--event-sampling-interval must be > 0"
         )
 
-    experiments_path = args.experiments.resolve()
-    runs_root = args.runs_root.resolve()
+    if args.sudo_nsys and not args.run_as:
+        raise ValueError(
+            "--run-as must be specified "
+            "when --sudo-nsys is used"
+        )
+
+    if (
+        args.sudo_nsys
+        and args.profile_mode != "gpu-metrics"
+    ):
+        print(
+            "WARNING: --sudo-nsys is normally only "
+            "required for gpu-metrics mode."
+        )
+
+    experiments_path = (
+        args.experiments.resolve()
+    )
+
+    runs_root = (
+        args.runs_root.resolve()
+    )
 
     valid_workloads = load_valid_workloads(
         experiments_path
@@ -271,7 +383,10 @@ def main() -> None:
             f"Unknown workload IDs: {unknown}"
         )
 
-    # CPU metrics must eventually be discovered on the real node.
+    # ----------------------------------------------------------
+    # CPU Metrics validation
+    # ----------------------------------------------------------
+
     cpu_metrics_value = args.cpu_metrics
 
     if args.profile_mode == "cpu-metrics":
@@ -284,39 +399,102 @@ def main() -> None:
 
             else:
                 raise SystemExit(
-                    "CPU metrics mode requires --cpu-metrics.\n"
+                    "CPU metrics mode requires "
+                    "--cpu-metrics.\n"
                     "First run on the target node:\n"
-                    "  nsys profile --cpu-metrics=help:all"
+                    "  nsys profile "
+                    "--cpu-metrics=help:all"
                 )
+
+    # ----------------------------------------------------------
+    # Resolve Nsight executable
+    # ----------------------------------------------------------
+
+    discovered_nsys = shutil.which("nsys")
+
+    if discovered_nsys is None:
+        if args.dry_run:
+            nsys_path = "nsys"
+        else:
+            raise SystemExit(
+                "Nsight Systems CLI 'nsys' "
+                "was not found in PATH."
+            )
+    else:
+        nsys_path = str(
+            Path(discovered_nsys).resolve()
+        )
+
+    # ----------------------------------------------------------
+    # Configuration summary
+    # ----------------------------------------------------------
 
     print("=" * 72)
     print("YOLO26 Nsight Systems Runner")
     print("=" * 72)
-    print(f"Device ID    : {args.device_id}")
-    print(f"CUDA dev     : {args.device}")
-    print(f"Workloads    : {', '.join(workloads)}")
-    print(f"Profile mode : {args.profile_mode}")
-    print(f"Repeat       : {args.repeat}")
-    print(f"Dry run      : {args.dry_run}")
+
+    print(
+        f"Device ID    : {args.device_id}"
+    )
+
+    print(
+        f"CUDA dev     : {args.device}"
+    )
+
+    print(
+        f"Workloads    : "
+        f"{', '.join(workloads)}"
+    )
+
+    print(
+        f"Profile mode : {args.profile_mode}"
+    )
+
+    print(
+        f"Repeat       : {args.repeat}"
+    )
+
+    print(
+        f"Dry run      : {args.dry_run}"
+    )
+
+    print(
+        f"Nsight path  : {nsys_path}"
+    )
+
+    print(
+        f"Sudo Nsight  : {args.sudo_nsys}"
+    )
+
+    if args.sudo_nsys:
+        print(
+            f"Run target as: {args.run_as}"
+        )
 
     if args.profile_mode == "gpu-metrics":
+
         print(
             f"GPU metrics  : devices="
             f"{args.gpu_metrics_devices}"
         )
+
         print(
             f"GPU frequency: "
             f"{args.gpu_metrics_frequency} Hz"
         )
+
         print(
             f"GPU set      : "
             f"{args.gpu_metrics_set or 'auto'}"
         )
 
     if args.profile_mode == "cpu-metrics":
+
         print(
-            f"CPU metrics  : {cpu_metrics_value}"
+            f"CPU metrics  : "
+            f"{cpu_metrics_value}"
         )
+
         print(
             f"CPU interval : "
             f"{args.event_sampling_interval} ms"
@@ -352,18 +530,33 @@ def main() -> None:
                 "GPU environment check failed."
             )
 
-        if shutil.which("nsys") is None:
+        # Resolve again after environment validation,
+        # ensuring the exact executable used below is recorded.
+        discovered_nsys = shutil.which("nsys")
+
+        if discovered_nsys is None:
             raise SystemExit(
                 "Nsight Systems CLI 'nsys' "
                 "was not found in PATH."
             )
 
-        nsys_version = get_nsys_version()
+        nsys_path = str(
+            Path(discovered_nsys).resolve()
+        )
+
+        nsys_version = get_nsys_version(
+            nsys_path
+        )
 
         if nsys_version:
             print()
             print("[Nsight Systems]")
-            print(nsys_version)
+            print(
+                f"Path    : {nsys_path}"
+            )
+            print(
+                f"Version : {nsys_version}"
+            )
 
     completed = 0
     skipped = 0
@@ -398,7 +591,10 @@ def main() -> None:
             str(report_base) + ".nsys-rep"
         )
 
-        if report_file.exists() and not args.force:
+        if (
+            report_file.exists()
+            and not args.force
+        ):
 
             print(
                 f"[SKIP] {workload_id}: "
@@ -408,18 +604,40 @@ def main() -> None:
             skipped += 1
             continue
 
-        if run_dir.exists() and args.force:
+        if (
+            run_dir.exists()
+            and args.force
+        ):
             if not args.dry_run:
-                shutil.rmtree(run_dir)
+                shutil.rmtree(
+                    run_dir
+                )
+
+        # ======================================================
+        # Nsight launcher
+        # ======================================================
+
+        if args.sudo_nsys:
+
+            command = [
+                "sudo",
+                nsys_path,
+                "profile",
+                f"--run-as={args.run_as}",
+            ]
+
+        else:
+
+            command = [
+                nsys_path,
+                "profile",
+            ]
 
         # ======================================================
         # Common trace configuration
         # ======================================================
 
-        command = [
-            "nsys",
-            "profile",
-
+        command.extend([
             "--trace=cuda,nvtx",
 
             # Disable CPU IP/backtrace sampling.
@@ -427,7 +645,7 @@ def main() -> None:
 
             # Disable context-switch tracing for v1.
             "--cpuctxsw=none",
-        ]
+        ])
 
         # ======================================================
         # GPU Metrics mode
@@ -473,7 +691,7 @@ def main() -> None:
             )
 
         # ======================================================
-        # Output
+        # Output and target application
         # ======================================================
 
         command.extend([
@@ -511,17 +729,26 @@ def main() -> None:
 
         print()
         print("-" * 72)
+
         print(
             f"[NSYS-{args.profile_mode.upper()}] "
             f"{workload_id} "
             f"repeat={args.repeat}"
         )
+
         print("-" * 72)
 
         print_command(command)
 
         if args.dry_run:
             continue
+
+        # ------------------------------------------------------
+        # Create run directory as the normal user BEFORE sudo.
+        #
+        # This keeps profiling_config.json and nsys.log owned by
+        # the experiment user rather than root.
+        # ------------------------------------------------------
 
         run_dir.mkdir(
             parents=True,
@@ -538,7 +765,16 @@ def main() -> None:
             "profile_mode": args.profile_mode,
             "repeat": args.repeat,
 
+            "nsys_path": nsys_path,
             "nsys_version": nsys_version,
+
+            "sudo_nsys": args.sudo_nsys,
+
+            "run_as": (
+                args.run_as
+                if args.sudo_nsys
+                else None
+            ),
 
             "trace": [
                 "cuda",
@@ -550,31 +786,36 @@ def main() -> None:
 
             "gpu_metrics_devices": (
                 args.gpu_metrics_devices
-                if args.profile_mode == "gpu-metrics"
+                if args.profile_mode
+                == "gpu-metrics"
                 else None
             ),
 
             "gpu_metrics_set": (
                 args.gpu_metrics_set
-                if args.profile_mode == "gpu-metrics"
+                if args.profile_mode
+                == "gpu-metrics"
                 else None
             ),
 
             "gpu_metrics_frequency_hz": (
                 args.gpu_metrics_frequency
-                if args.profile_mode == "gpu-metrics"
+                if args.profile_mode
+                == "gpu-metrics"
                 else None
             ),
 
             "cpu_metrics": (
                 cpu_metrics_value
-                if args.profile_mode == "cpu-metrics"
+                if args.profile_mode
+                == "cpu-metrics"
                 else None
             ),
 
             "event_sampling_interval_ms": (
                 args.event_sampling_interval
-                if args.profile_mode == "cpu-metrics"
+                if args.profile_mode
+                == "cpu-metrics"
                 else None
             ),
 
@@ -591,6 +832,10 @@ def main() -> None:
             ),
             encoding="utf-8",
         )
+
+        # ------------------------------------------------------
+        # Run Nsight Systems
+        # ------------------------------------------------------
 
         log_path = (
             run_dir
@@ -611,11 +856,35 @@ def main() -> None:
                 f"Log: {log_path}"
             )
 
+        # ------------------------------------------------------
+        # Verify report
+        # ------------------------------------------------------
+
         if not report_file.exists():
 
             raise RuntimeError(
                 "Nsight command completed but "
                 "profile.nsys-rep was not generated:\n"
+                f"{report_file}"
+            )
+
+        # ------------------------------------------------------
+        # Restore report ownership after privileged Nsight run.
+        #
+        # sudo nsys creates the .nsys-rep as root.
+        # The YOLO target itself still runs as args.run_as.
+        # ------------------------------------------------------
+
+        if args.sudo_nsys:
+
+            restore_file_ownership(
+                report_file,
+                args.run_as,
+            )
+
+            print(
+                "[Ownership restored] "
+                f"{args.run_as}: "
                 f"{report_file}"
             )
 
@@ -638,9 +907,17 @@ def main() -> None:
 
     else:
 
-        print("NSIGHT COLLECTION COMPLETE")
-        print(f"Completed : {completed}")
-        print(f"Skipped   : {skipped}")
+        print(
+            "NSIGHT COLLECTION COMPLETE"
+        )
+
+        print(
+            f"Completed : {completed}"
+        )
+
+        print(
+            f"Skipped   : {skipped}"
+        )
 
     print("=" * 72)
 
