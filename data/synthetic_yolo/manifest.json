@@ -1,0 +1,14 @@
+{
+  "dataset": "synthetic_yolo_runtime_prediction_v1",
+  "seed": 20260817,
+  "image_width": 640,
+  "image_height": 640,
+  "train_images": 512,
+  "val_images": 32,
+  "objects_per_image": 1,
+  "classes": 1,
+  "class_names": [
+    "synthetic_object"
+  ],
+  "dataset_sha256": "2c8c4b0b9bb0adfeb76a0b864797c258f4101bb7ad71885a0d027afad399e8c6"
+}
