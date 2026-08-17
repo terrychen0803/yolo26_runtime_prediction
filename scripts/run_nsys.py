@@ -913,19 +913,6 @@ def main() -> None:
 
         completed += 1
 
-        print(
-                "[Ownership restored] "
-                f"{args.run_as}: "
-                f"{report_file}"
-            )
-
-        print(
-            f"[OK] {workload_id}: "
-            f"{report_file}"
-        )
-
-        completed += 1
-
     print()
     print("=" * 72)
 
