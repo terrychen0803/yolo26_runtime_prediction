@@ -619,11 +619,24 @@ def main() -> None:
 
         if args.sudo_nsys:
 
+            user_info = pwd.getpwnam(
+                args.run_as
+            )
+
+            target_home = user_info.pw_dir
+
             command = [
                 "sudo",
                 nsys_path,
                 "profile",
+
                 f"--run-as={args.run_as}",
+
+                "--env-var="
+                f"HOME={target_home},"
+                f"USER={args.run_as},"
+                f"LOGNAME={args.run_as},"
+                f"XDG_CONFIG_HOME={target_home}/.config",
             ]
 
         else:
@@ -847,6 +860,35 @@ def main() -> None:
             log_path,
         )
 
+        # ------------------------------------------------------
+        # Restore report ownership whenever a report exists.
+        #
+        # Nsight may still generate a report even when the
+        # profiled target application exits with an error.
+        # Therefore ownership restoration must happen BEFORE
+        # checking the Nsight return code.
+        # ------------------------------------------------------
+
+        if (
+            args.sudo_nsys
+            and report_file.exists()
+        ):
+
+            restore_file_ownership(
+                report_file,
+                args.run_as,
+            )
+
+            print(
+                "[Ownership restored] "
+                f"{args.run_as}: "
+                f"{report_file}"
+            )
+
+        # ------------------------------------------------------
+        # Check profiling result
+        # ------------------------------------------------------
+
         if return_code != 0:
 
             raise SystemExit(
@@ -856,10 +898,6 @@ def main() -> None:
                 f"Log: {log_path}"
             )
 
-        # ------------------------------------------------------
-        # Verify report
-        # ------------------------------------------------------
-
         if not report_file.exists():
 
             raise RuntimeError(
@@ -868,21 +906,14 @@ def main() -> None:
                 f"{report_file}"
             )
 
-        # ------------------------------------------------------
-        # Restore report ownership after privileged Nsight run.
-        #
-        # sudo nsys creates the .nsys-rep as root.
-        # The YOLO target itself still runs as args.run_as.
-        # ------------------------------------------------------
+        print(
+            f"[OK] {workload_id}: "
+            f"{report_file}"
+        )
 
-        if args.sudo_nsys:
+        completed += 1
 
-            restore_file_ownership(
-                report_file,
-                args.run_as,
-            )
-
-            print(
+        print(
                 "[Ownership restored] "
                 f"{args.run_as}: "
                 f"{report_file}"
