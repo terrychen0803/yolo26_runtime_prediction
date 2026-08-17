@@ -1,6 +1,0 @@
-path: "C:/python_projects/yolo26_runtime_prediction/data/synthetic_yolo"
-train: images/train
-val: images/val
-
-names:
-  0: synthetic_object
