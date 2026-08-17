@@ -94,21 +94,69 @@ def sha256_file(path: Path) -> str:
 
 def build_dataset_hash(dataset_root: Path) -> str:
     """
-    Build a reproducibility hash over images and labels only.
-    data.yaml is excluded because it contains a machine-specific absolute path.
+    Build a platform-independent semantic dataset hash.
+
+    Images are hashed using decoded RGB pixel values rather than
+    compressed PNG bytes, because PNG encoding may differ between
+    Pillow/libpng versions while representing identical pixels.
+
+    Label text is normalized to LF line endings.
     """
 
     hasher = hashlib.sha256()
 
-    files = sorted(
-        list((dataset_root / "images").rglob("*.*"))
-        + list((dataset_root / "labels").rglob("*.txt"))
+    image_files = sorted(
+        (dataset_root / "images").rglob("*.png")
     )
 
-    for path in files:
-        relative = path.relative_to(dataset_root).as_posix()
-        hasher.update(relative.encode("utf-8"))
-        hasher.update(sha256_file(path).encode("ascii"))
+    label_files = sorted(
+        (dataset_root / "labels").rglob("*.txt")
+    )
+
+    for path in image_files:
+        relative = path.relative_to(
+            dataset_root
+        ).as_posix()
+
+        hasher.update(
+            relative.encode("utf-8")
+        )
+
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+
+            hasher.update(
+                f"{image.width}x{image.height}:RGB".encode(
+                    "ascii"
+                )
+            )
+
+            hasher.update(
+                image.tobytes()
+            )
+
+    for path in label_files:
+        relative = path.relative_to(
+            dataset_root
+        ).as_posix()
+
+        hasher.update(
+            relative.encode("utf-8")
+        )
+
+        text = path.read_text(
+            encoding="utf-8"
+        )
+
+        canonical_text = (
+            text
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
+
+        hasher.update(
+            canonical_text.encode("utf-8")
+        )
 
     return hasher.hexdigest()
 

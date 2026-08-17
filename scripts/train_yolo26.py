@@ -644,7 +644,6 @@ def main() -> None:
 
             model=workload["model"],
 
-            # Large upper bound; callback stops exactly at max_iters.
             epochs=20,
 
             imgsz=workload["imgsz"],
@@ -659,18 +658,14 @@ def main() -> None:
 
             optimizer="AdamW",
 
-            # Disable LR/accumulation warm-up as an experimental variable.
             warmup_epochs=0.0,
 
-            # Reduce data-input variability.
             cache="ram",
 
-            # Accuracy-related activities are not part of this benchmark.
             val=False,
             save=False,
             plots=False,
 
-            # Disable resolution and augmentation randomness.
             multi_scale=0.0,
 
             mosaic=0.0,
@@ -699,6 +694,39 @@ def main() -> None:
             name="ultralytics",
             exist_ok=True,
         )
+
+    except FileNotFoundError as exc:
+        message = str(exc)
+
+        expected_checkpoint_error = (
+            "Training completed but no checkpoint was saved."
+            in message
+        )
+
+        completed_expected_iterations = (
+            recorder.iteration_id
+            >= workload["max_iters"]
+        )
+
+        if (
+            expected_checkpoint_error
+            and completed_expected_iterations
+        ):
+            print()
+            print(
+                "NOTE: Ultralytics attempted to reload a "
+                "checkpoint after training."
+            )
+            print(
+                "Checkpoint saving is intentionally disabled "
+                "for this performance benchmark."
+            )
+            print(
+                "The requested iteration window completed "
+                "successfully; ignoring this expected error."
+            )
+        else:
+            raise
 
     finally:
         recorder.finalize()
